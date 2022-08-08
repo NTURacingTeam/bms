@@ -621,7 +621,7 @@ void run_command(uint32_t cmd)
       {
         //Communication control bits and communication data bytes. Refer to the data sheet.
 
-        BMS_IC[current_ic].com.tx_data[0] = 0x69; // Icom Start (6) + I2C_address D0 (99)        
+        BMS_IC[current_ic].com.tx_data[0] = 0x69; // Icom Start (6) + I2C_address D0 (99)
         //BMS_IC[current_ic].com.tx_data[0] = 0x6F; // Icom Start (6) + I2C_address D0 (9F)
         BMS_IC[current_ic].com.tx_data[1] = 0x98; // Fcom master NACK(8)
         BMS_IC[current_ic].com.tx_data[2] = 0x01; // Icom Blank (0) + D1 (11) <-random read byte
@@ -1374,4 +1374,14 @@ void TCA9548A(uint8_t bus) {
   Wire.beginTransmission(0x70);  // TCA9548A address is 0x70
   Wire.write(1 << bus);          // send byte to select bus
   Wire.endTransmission();
+}
+
+double VOLT_READING_TO_TEMP(double v_read) {
+  double v_ref = 3.0; //Pulled up to 3Volt
+  double r_pull_up = 4700.0; //Pulled up by a 4.7kOhm resistor
+  double r_ntc = v_read * r_pull_up / (v_ref - v_read);
+  double r_25 = 10000.0; //10kOhm at 25 degree Celcius
+  double b_const = 3380.0; //B-Constant (25/50℃): 3380k
+  double t = 1 / (log(r_ntc / r_25) / b_const + 1 / 298.15) - 273.15;
+  return t; //return temperature in celcius
 }
