@@ -10,18 +10,16 @@
 #include "LTC681x.h"
 #include "LTC6811.h"
 
-
-//ADS+MUX
-#include <ADS1X15.h>
-#include <Wire.h>
-#define Mux_Addr 0x70 //i2c Mux Address
-ADS1115 ADS(0x48); // ADS ADDR 0x48 0x49 0x4A 0x4B
-
 /************************* Defines *****************************/
+#define DEBUG_MODE 0 //1: debugging, 0: racing                    <-------要改-----------------------------
+
 #define ENABLED 1
 #define DISABLED 0
 #define DATALOG_ENABLED 1
 #define DATALOG_DISABLED 0
+
+static int ADG728_L[6] = {5, 6, 4, 3, 2, 1};
+static int ADG728_R[6] = {10, 9, 8, 7, 11, 12};
 
 /**************** Local Function Declaration *******************/
 void measurement_loop(uint8_t datalog_en);
@@ -51,12 +49,23 @@ void serial_print_text(char data[]);
 void serial_print_hex(uint8_t data);
 char read_hex(void);
 char get_char(void);
+void START_I2C_COMM(bool is_L, int s_pin);
 
 /*******************************************************************
   Setup Variables
   The following variables can be modified to configure the software.
 ********************************************************************/
-const uint8_t TOTAL_IC = 2;//!< Number of ICs in the daisy chain
+const uint8_t TOTAL_IC = 12;//!< Number of ICs in the daisy chain <----------------------------------------
+const uint8_t BEGIN_IC = 2; //Start detect flaw IC. 1 is the first IC
+const uint8_t END_IC = 2; //END detect flaw IC. 12 is last IC
+
+const double OVER_VOLTAGE = 4.2; //Volt                            <----------------------------------------
+const double UNDER_VOLTAGE = 3.0;//                                <----------------------------------------
+const double OVER_TEMPERATURE = 60.0; //Degree Celcius             <----------------------------------------
+const double UNDER_TEMPERATURE = -20.0;//                          <----------------------------------------
+
+const int MEASURE_INTERVAL = 100000; //milliseconds                  <----------------------------------------
+const int STATUS_PIN = 9;// Pin 9 is for output stats, HIGH when error <------------------------------------
 
 //ADC Command Configurations. See LTC681x.h for options.
 const uint8_t ADC_OPT = ADC_OPT_DISABLED; //!< ADC Mode option bit
@@ -72,8 +81,8 @@ const uint8_t SEL_REG_B = REG_2; //!< Register Selection
 const uint16_t MEASUREMENT_LOOP_TIME = 500; //!< Loop Time in milliseconds(ms)
 
 //Under Voltage and Over Voltage Thresholds
-const uint16_t OV_THRESHOLD = 41000; //!< Over voltage threshold ADC Code. LSB = 0.0001 ---(4.1V)
-const uint16_t UV_THRESHOLD = 20000; //!< Under voltage threshold ADC Code. LSB = 0.0001 ---(3V)
+const uint16_t OV_THRESHOLD = (OVER_VOLTAGE * 10000); //!< Over voltage threshold ADC Code. LSB = 0.0001 ---(4.1V)
+const uint16_t UV_THRESHOLD = (UNDER_VOLTAGE * 10000); //!< Under voltage threshold ADC Code. LSB = 0.0001 ---(3V)
 
 //Loop Measurement Setup. These Variables are ENABLED or DISABLED. Remember ALL CAPS
 const uint8_t WRITE_CONFIG = DISABLED;  //!< This is to ENABLED or DISABLED writing into to configuration registers in a continuous loop
@@ -93,30 +102,12 @@ const uint8_t PRINT_PEC = DISABLED; //!< This is to ENABLED or DISABLED printing
   on the number of ICs on the stack
  ******************************************************/
 cell_asic BMS_IC[TOTAL_IC]; //!< Global Battery Variable
-/*
-  typedef struct
-  {
-  ic_register config;
-  ic_register configb;
-  ic_register com;
-  ic_register pwm;
-  ic_register pwmb;
-  ic_register sctrl;
-  ic_register sctrlb;
 
-  105 bytes
-
-  cv  cells;
-  ax  aux;
-  st  stat;
-  uint8_t sid[6];
-  bool isospi_reverse;
-  pec_counter crc_count;
-  register_cfg ic_reg;
-  long system_open_wire;
-  bytes
-  } cell_asic;
-*/
+struct cell_data {
+  double cell_voltage[12] = {0};
+  double temperature[12] = {0};
+};
+cell_data BMS_DATA[TOTAL_IC]; //data to be read
 
 /*********************************************************
   Set the configuration bits.
@@ -142,45 +133,22 @@ void setup()
 {
   Serial.begin(115200);
 
-  quikeval_SPI_connect();
+  //quikeval_SPI_connect();
 
   spi_enable(SPI_CLOCK_DIV16); // This will set the Linduino to have a 1MHz Clock
   LTC6811_init_cfg(TOTAL_IC, BMS_IC);
   for (uint8_t current_ic = 0; current_ic < TOTAL_IC; current_ic++)
   {
     LTC6811_set_cfgr(current_ic, BMS_IC, REFON, ADCOPT, GPIOBITS_A, DCCBITS_A, DCTOBITS, UV, OV);
-    /*
-      void LTC681x_set_cfgr(uint8_t nIC, // Current IC
-               cell_asic *ic, // A two dimensional array that stores the data
-               bool refon, // The REFON bit
-               bool adcopt, // The ADCOPT bit
-               bool gpio[5], // The GPIO bits
-               bool dcc[12], // The DCC bits
-               bool dcto[4], // The Dcto bits
-               uint16_t uv, // The UV value
-               uint16_t  ov // The OV value
-               )
-      {
-      LTC681x_set_cfgr_refon(nIC,ic,refon);
-      LTC681x_set_cfgr_adcopt(nIC,ic,adcopt);
-      LTC681x_set_cfgr_gpio(nIC,ic,gpio);
-      LTC681x_set_cfgr_dis(nIC,ic,dcc);
-      LTC681x_set_cfgr_dcto(nIC,ic,dcto);
-      LTC681x_set_cfgr_uv(nIC, ic, uv);
-      LTC681x_set_cfgr_ov(nIC, ic, ov);
-      }
-    */
   }
   LTC6811_reset_crc_count(TOTAL_IC, BMS_IC);
   LTC6811_init_reg_limits(TOTAL_IC, BMS_IC);
+
+  run_command(1); //write config
+  pinMode(STATUS_PIN, OUTPUT);
+  digitalWrite(STATUS_PIN, LOW);
+
   print_menu();
-
-  MUX_ADS_RESET();
-
-  //Serial.println(MOSI); //51
-  //Serial.println(MISO); //50
-  //Serial.println(SS);   //53
-  //Serial.println(SCK);  //52
 }
 
 /*!*********************************************************************
@@ -189,20 +157,122 @@ void setup()
 ***********************************************************************/
 void loop()
 {
-  if (Serial.available())           // Check for user input
-  {
-    uint32_t user_command;
-    user_command = read_int();      // Read the user command
-    if (user_command == 'm')
+  if (DEBUG_MODE) {
+    if (Serial.available())           // Check for user input
     {
-      print_menu();
+      uint32_t user_command;
+      user_command = read_int();      // Read the user command
+      if (user_command == 'm')
+      {
+        print_menu();
+      }
+      else
+      {
+        Serial.println(user_command);
+        run_command(user_command);
+      }
     }
-    else
-    {
-      Serial.println(user_command);
-      run_command(user_command);
+  } else { //racing function
+    run_command(3); //LTC6811 measure cell volt
+    run_command(4); //read cell volt from LTC6811
+    for (int current_ic = 0 ; current_ic < TOTAL_IC; current_ic++) {
+      for (int i = 0; i < BMS_IC[0].ic_reg.cell_channels; i++) {
+        BMS_DATA[current_ic].cell_voltage[i] = (BMS_IC[current_ic].cells.c_codes[i] * 0.0001); //get all voltage
+      }
     }
-  }
+
+    for (int sn = 1; sn <= 6; sn++) {
+      START_I2C_COMM(1, sn); //set Left(11) to Sn
+      START_I2C_COMM(0, sn); //set Right(00) to Sn
+      run_command(5); //start aux measuing
+      run_command(6);
+      for (int current_ic = 0 ; current_ic < TOTAL_IC; current_ic++)
+      {
+        BMS_DATA[current_ic].temperature[ADG728_L[sn - 1] - 1] = VOLT_READING_TO_TEMP(BMS_IC[current_ic].aux.a_codes[0] * 0.0001); //GPIO 1 Left
+        BMS_DATA[current_ic].temperature[ADG728_R[sn - 1] - 1] = VOLT_READING_TO_TEMP(BMS_IC[current_ic].aux.a_codes[2] * 0.0001); //GPIO 3 Right
+      }
+    }
+
+    //temperature and voltage measured and saved, now print results
+    Serial.println("$STAT$");
+    for (int current_ic = 0 ; current_ic < TOTAL_IC; current_ic++) {
+      for (int i = 0; i < 12; i++) {
+        Serial.print("$");
+        Serial.print(BMS_DATA[current_ic].cell_voltage[i]);
+      }
+      for (int i = 0; i < 12; i++) {
+        Serial.print("$");
+        Serial.print(BMS_DATA[current_ic].temperature[i]);
+      }
+      Serial.println("$");
+    }
+    Serial.println("$ENDSTAT$");
+
+    //error detection
+    bool error_flag = false;
+    bool error_type; //false for voltage, true for temperature
+    bool error_bound; //false for under, true for over
+    uint8_t error_ic; //starts with 1
+    uint8_t error_cell; //starts with 1
+    for (int current_ic = (BEGIN_IC - 1) ; current_ic < END_IC; current_ic++) {
+      for (int i = 0; i < 12; i++) {
+        if (error_flag) {
+          break;
+        } else if (UNDER_VOLTAGE > BMS_DATA[current_ic].cell_voltage[i]) {
+          error_flag = true; //has error
+          error_type = false; //volt error
+          error_bound = false; //under
+          error_ic = current_ic + 1;
+          error_cell = i + 1;
+        } else if (BMS_DATA[current_ic].cell_voltage[i] > OVER_VOLTAGE) {
+          error_flag = true; //has error
+          error_type = false; //volt error
+          error_bound = true; //over
+          error_ic = current_ic + 1;
+          error_cell = i + 1;
+        }
+      }
+      for (int i = 0; i < 12; i++) {
+        if (error_flag) {
+          break;
+        } else if (UNDER_TEMPERATURE > BMS_DATA[current_ic].temperature[i]) {
+          error_flag = true; //has error
+          error_type = true; //temperature error
+          error_bound = false; //under
+          error_ic = current_ic + 1;
+          error_cell = i + 1;
+        } else if (BMS_DATA[current_ic].temperature[i] > OVER_TEMPERATURE) {
+          error_flag = true; //has error
+          error_type = true; //temperature error
+          error_bound = true; //over
+          error_ic = current_ic + 1;
+          error_cell = i + 1;
+        }
+      }
+    }
+
+    Serial.println("$ERROR$");
+    if (error_flag) {
+      if (!error_bound) {
+        Serial.print("Under"); //false for under
+      } else {
+        Serial.print("Over"); //true for over
+      }
+      if (!error_type) { //volt error
+        Serial.print("Voltage error at IC "); //false for volt
+      } else { //vtemperature error
+        Serial.print("Temperature error at IC "); //true for temp
+      }
+      Serial.print(error_ic);
+      Serial.print(" Cell ");
+      Serial.println(error_cell);
+
+      digitalWrite(STATUS_PIN, HIGH);
+    }
+    Serial.println("$ENDERROR$");
+
+    delay(MEASURE_INTERVAL);
+  } //end racing function
 }
 
 /*!*****************************************
@@ -656,10 +726,6 @@ void run_command(uint32_t cmd)
       print_wrconfig();
       break;
 
-    case 32: //mux adc
-      read_ADS();
-      break;
-
     case 'm': //prints menu
       print_menu();
       break;
@@ -833,7 +899,8 @@ void print_cells(uint8_t datalog_en)
     {
       Serial.print(" IC ");
       Serial.print(current_ic + 1, DEC);
-      Serial.print(": ");      for (int i = 0; i < BMS_IC[0].ic_reg.cell_channels; i++)
+      Serial.print(": ");
+      for (int i = 0; i < BMS_IC[0].ic_reg.cell_channels; i++)
       {
         Serial.print(" C");
         Serial.print(i + 1, DEC);
@@ -1324,8 +1391,7 @@ char byte_to_hex_buffer[3] =
   \brief Read 2 hex characters from the serial buffer and convert them to a byte
   @return char data Read Data
  *************************************************************/
-char read_hex(void)
-{
+char read_hex(void) {
   byte data;
   hex_to_byte_buffer[2] = get_char();
   hex_to_byte_buffer[3] = get_char();
@@ -1339,42 +1405,11 @@ char read_hex(void)
   \brief Read a command from the serial port
   @return char
  *************************************************************/
-char get_char(void)
-{
+char get_char(void) {
   while (Serial.available() <= 0);
   return (Serial.read());
 }
 
-void read_ADS() {
-  //ADS reading channel 0 ~ 3
-  int16_t val_0 = ADS.readADC(0);
-  int16_t val_1 = ADS.readADC(1);
-  int16_t val_2 = ADS.readADC(2);
-  int16_t val_3 = ADS.readADC(3);
-
-  float f = ADS.toVoltage(1);  // voltage factor
-
-  Serial.print("\tAnalog0: "); Serial.print(val_0); Serial.print('\t'); Serial.println(val_0 * f, 3);
-  Serial.print("\tAnalog1: "); Serial.print(val_1); Serial.print('\t'); Serial.println(val_1 * f, 3);
-  Serial.print("\tAnalog2: "); Serial.print(val_2); Serial.print('\t'); Serial.println(val_2 * f, 3);
-  Serial.print("\tAnalog3: "); Serial.print(val_3); Serial.print('\t'); Serial.println(val_3 * f, 3);
-
-}
-
-void MUX_ADS_RESET() {
-
-  TCA9548A(0); //I2C MUX Channel 0~7
-  ADS.begin();
-  ADS.setGain(0);      // 6.144 volt
-  ADS.setDataRate(7);  // fast
-  ADS.setMode(0);      // continuous mode
-}
-
-void TCA9548A(uint8_t bus) {
-  Wire.beginTransmission(0x70);  // TCA9548A address is 0x70
-  Wire.write(1 << bus);          // send byte to select bus
-  Wire.endTransmission();
-}
 
 double VOLT_READING_TO_TEMP(double v_read) {
   double v_ref = 3.0; //Pulled up to 3Volt
@@ -1382,6 +1417,48 @@ double VOLT_READING_TO_TEMP(double v_read) {
   double r_ntc = v_read * r_pull_up / (v_ref - v_read);
   double r_25 = 10000.0; //10kOhm at 25 degree Celcius
   double b_const = 3380.0; //B-Constant (25/50℃): 3380k
-  double t = 1 / (log(r_ntc / r_25) / b_const + 1 / 298.15) - 273.15;
+  double t = 1 / (log((r_ntc / r_25 > 0 ? r_ntc / r_25 : 0)) / b_const + 1 / 298.15) - 273.15;
   return t; //return temperature in celcius
+}
+
+void START_I2C_COMM(bool is_L, int s_pin) {
+  uint8_t streg = 0;
+  int8_t error = 0;
+  uint32_t conv_time = 0;
+  int8_t s_pin_read = 0;
+
+  for (uint8_t current_ic = 0; current_ic < TOTAL_IC; current_ic++)
+  {
+    //Communication control bits and communication data bytes. Refer to the data sheet.
+    BMS_IC[current_ic].com.tx_data[0] = 0x69; // Icom Start(6) + I2C_address D0 (98) addr=00
+    if (is_L) { //is the left adg728
+      BMS_IC[current_ic].com.tx_data[1] = 0xE8; // Fcom master NACK(8)
+    } else { //is the right adg728
+      BMS_IC[current_ic].com.tx_data[1] = 0x88; // Fcom master NACK(8)
+    }
+
+
+    if (s_pin < 5) {
+      BMS_IC[current_ic].com.tx_data[2] = 0x00; // Icom Blank (0) + D1 (s8 s7 s6 s5 0000) <- S8~S1
+      BMS_IC[current_ic].com.tx_data[3] = (0x09 | (0x10 << (s_pin - 1))); // Fcom master NACK + Stop(9)
+    } else {
+      BMS_IC[current_ic].com.tx_data[2] = (0x00 | (0x01 << (s_pin - 5))); // Icom Blank (0) + D1 (0000 s4 s3 s2 s1) <- S8~S1
+      BMS_IC[current_ic].com.tx_data[3] = 0x09; // Fcom master NACK + Stop(9)
+    }
+
+    BMS_IC[current_ic].com.tx_data[4] = 0x7F; // Icom No Transmit (7) + data D2 (FF)
+    BMS_IC[current_ic].com.tx_data[5] = 0xF9; // Fcom master NACK + Stop(9)
+  }
+
+  wakeup_sleep(TOTAL_IC);
+  LTC6811_wrcomm(TOTAL_IC, BMS_IC); // write to comm register
+  print_wrcomm(); // print transmitted data from the comm register
+
+  wakeup_idle(TOTAL_IC);
+  LTC6811_stcomm(3); // initiates communication between master and the I2C slave
+
+  wakeup_idle(TOTAL_IC);
+  error = LTC6811_rdcomm(TOTAL_IC, BMS_IC); // read from comm register
+  check_error(error);
+  print_rxcomm(); // print received data into the comm register
 }
