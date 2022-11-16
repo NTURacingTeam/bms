@@ -11,15 +11,36 @@
 #include "LTC6811.h"
 
 /************************* Defines *****************************/
-#define DEBUG_MODE 0 //1: debugging, 0: racing                    <-------要改-----------------------------
+#define DEBUG_MODE 1 //1: debugging, 0: racing                    <-------要改-----------------------------
+const unsigned int ALLOWED_VOLTAGE_ERROR[8]={
+  0b000000000000,
+  0b000000000000,
+  0b000000000000,
+  0b000000000000,
+  0b000000000000,
+  0b000000000000,
+  0b000000000000,
+  0b000000000000
+  };
+
+ const unsigned int ALLOWED_TEMPERATURE_ERROR[8]={
+  0b000000000000,
+  0b000000000000,
+  0b000000000000,
+  0b000000000000,
+  0b000000000000,
+  0b000000000000,
+  0b000000000000,
+  0b000000000000
+  };
 
 #define ENABLED 1
 #define DISABLED 0
 #define DATALOG_ENABLED 1
 #define DATALOG_DISABLED 0
 
-static int ADG728_L[6] = {5, 6, 4, 3, 2, 1};
-static int ADG728_R[6] = {10, 9, 8, 7, 11, 12};
+/*static int ADG728_L[6] = {5, 6, 4, 3, 2, 1};
+static int ADG728_R[6] = {10, 9, 8, 7, 11, 12};*/
 
 /**************** Local Function Declaration *******************/
 void measurement_loop(uint8_t datalog_en);
@@ -55,16 +76,16 @@ void START_I2C_COMM(bool is_L, int s_pin);
   Setup Variables
   The following variables can be modified to configure the software.
 ********************************************************************/
-const uint8_t TOTAL_IC = 12;//!< Number of ICs in the daisy chain <----------------------------------------
-const uint8_t BEGIN_IC = 2; //Start detect flaw IC. 1 is the first IC
-const uint8_t END_IC = 2; //END detect flaw IC. 12 is last IC
+const uint8_t TOTAL_IC = 8;//!< Number of ICs in the daisy chain <----------------------------------------
+const uint8_t BEGIN_IC = 1; //Start detect flaw IC. 1 is the first IC
+const uint8_t END_IC = TOTAL_IC; //END detect flaw IC. 8 is last IC
 
-const double OVER_VOLTAGE = 4.2; //Volt                            <----------------------------------------
-const double UNDER_VOLTAGE = 3.0;//                                <----------------------------------------
+const double OVER_VOLTAGE = 4.2+0.6; //Volt                            <----------------------------------------
+const double UNDER_VOLTAGE = 3.0+0.4;//                                <----------------------------------------
 const double OVER_TEMPERATURE = 60.0; //Degree Celcius             <----------------------------------------
-const double UNDER_TEMPERATURE = -20.0;//                          <----------------------------------------
+const double UNDER_TEMPERATURE = -274.0;//                          <----------------------------------------
 
-const int MEASURE_INTERVAL = 100000; //milliseconds                  <----------------------------------------
+const int MEASURE_INTERVAL = 10000; //milliseconds                  <----------------------------------------
 const int STATUS_PIN = 9;// Pin 9 is for output stats, HIGH when error <------------------------------------
 
 //ADC Command Configurations. See LTC681x.h for options.
@@ -115,7 +136,7 @@ cell_data BMS_DATA[TOTAL_IC]; //data to be read
 **********************************************************/
 bool REFON = true; //!< Reference Powered Up Bit
 bool ADCOPT = false; //!< ADC Mode option bit
-bool GPIOBITS_A[5] = {true, true, true, true, true}; //!< GPIO Pin Control // Gpio 1,2,3,4,5
+bool GPIOBITS_A[5] = {true, true, false, false, false}; //!< GPIO Pin Control // Gpio 1,2,3,4,5
 uint16_t UV = UV_THRESHOLD; //!< Under-voltage Comparison Voltage
 uint16_t OV = OV_THRESHOLD; //!< Over-voltage Comparison Voltage
 bool DCCBITS_A[12] = {false, false, false, false, false, false, false, false, false, false, false, false}; //!< Discharge cell switch //Dcc 1,2,3,4,5,6,7,8,9,10,11,12
@@ -148,7 +169,9 @@ void setup()
   pinMode(STATUS_PIN, OUTPUT);
   digitalWrite(STATUS_PIN, LOW);
 
+#if DEBUG_MODE
   print_menu();
+#endif
 }
 
 /*!*********************************************************************
@@ -162,12 +185,9 @@ void loop()
     {
       uint32_t user_command;
       user_command = read_int();      // Read the user command
-      if (user_command == 'm')
-      {
+      if (user_command == 'm'){
         print_menu();
-      }
-      else
-      {
+      }else{
         Serial.println(user_command);
         run_command(user_command);
       }
@@ -180,22 +200,24 @@ void loop()
         BMS_DATA[current_ic].cell_voltage[i] = (BMS_IC[current_ic].cells.c_codes[i] * 0.0001); //get all voltage
       }
     }
-
-    for (int sn = 1; sn <= 6; sn++) {
-      START_I2C_COMM(1, sn); //set Left(11) to Sn
-      START_I2C_COMM(0, sn); //set Right(00) to Sn
+    for(int i=0; i<6; i++){
+      //GPIOBITS_A = {true, true, ((i&0b001)>>0), ((i&0b010)>>1), ((i&0b100)>>2)}; //set channel of mux
+      GPIOBITS_A[2] = (i&0b001)>>0;
+      GPIOBITS_A[3] = (i&0b010)>>1;
+      GPIOBITS_A[4] = (i&0b100)>>2;
+      run_command(31); //reset gpio status
       run_command(5); //start aux measuing
-      run_command(6);
-      for (int current_ic = 0 ; current_ic < TOTAL_IC; current_ic++)
-      {
-        BMS_DATA[current_ic].temperature[ADG728_L[sn - 1] - 1] = VOLT_READING_TO_TEMP(BMS_IC[current_ic].aux.a_codes[0] * 0.0001); //GPIO 1 Left
-        BMS_DATA[current_ic].temperature[ADG728_R[sn - 1] - 1] = VOLT_READING_TO_TEMP(BMS_IC[current_ic].aux.a_codes[2] * 0.0001); //GPIO 3 Right
+      run_command(6); //read back aux measuing
+      for (int current_ic = 0 ; current_ic < TOTAL_IC; current_ic++){
+        BMS_DATA[current_ic].temperature[i] = VOLT_READING_TO_TEMP(BMS_IC[current_ic].aux.a_codes[0] * 0.0001); //GPIO 1 Left
+        BMS_DATA[current_ic].temperature[i+6] = VOLT_READING_TO_TEMP(BMS_IC[current_ic].aux.a_codes[1] * 0.0001); //GPIO 2 Right    
       }
     }
 
     //temperature and voltage measured and saved, now print results
     Serial.println("$STAT$");
     for (int current_ic = 0 ; current_ic < TOTAL_IC; current_ic++) {
+      Serial.print(current_ic + 1);
       for (int i = 0; i < 12; i++) {
         Serial.print("$");
         Serial.print(BMS_DATA[current_ic].cell_voltage[i]);
@@ -204,7 +226,7 @@ void loop()
         Serial.print("$");
         Serial.print(BMS_DATA[current_ic].temperature[i]);
       }
-      Serial.println("$");
+      Serial.println("");
     }
     Serial.println("$ENDSTAT$");
 
@@ -218,13 +240,13 @@ void loop()
       for (int i = 0; i < 12; i++) {
         if (error_flag) {
           break;
-        } else if (UNDER_VOLTAGE > BMS_DATA[current_ic].cell_voltage[i]) {
+        } else if ((UNDER_VOLTAGE > BMS_DATA[current_ic].cell_voltage[i])&& !((ALLOWED_VOLTAGE_ERROR[current_ic]>>(11-i))&0b1)) {
           error_flag = true; //has error
           error_type = false; //volt error
           error_bound = false; //under
           error_ic = current_ic + 1;
           error_cell = i + 1;
-        } else if (BMS_DATA[current_ic].cell_voltage[i] > OVER_VOLTAGE) {
+        } else if ((BMS_DATA[current_ic].cell_voltage[i] > OVER_VOLTAGE)&& !((ALLOWED_VOLTAGE_ERROR[current_ic]>>(11-i))&0b1)) {
           error_flag = true; //has error
           error_type = false; //volt error
           error_bound = true; //over
@@ -235,13 +257,13 @@ void loop()
       for (int i = 0; i < 12; i++) {
         if (error_flag) {
           break;
-        } else if (UNDER_TEMPERATURE > BMS_DATA[current_ic].temperature[i]) {
+        } else if ((UNDER_TEMPERATURE > BMS_DATA[current_ic].temperature[i])&& !((ALLOWED_TEMPERATURE_ERROR[current_ic]>>(11-i))&0b1)) {
           error_flag = true; //has error
           error_type = true; //temperature error
           error_bound = false; //under
           error_ic = current_ic + 1;
           error_cell = i + 1;
-        } else if (BMS_DATA[current_ic].temperature[i] > OVER_TEMPERATURE) {
+        } else if ((BMS_DATA[current_ic].temperature[i] > OVER_TEMPERATURE)&& !((ALLOWED_TEMPERATURE_ERROR[current_ic]>>(11-i))&0b1)) {
           error_flag = true; //has error
           error_type = true; //temperature error
           error_bound = true; //over
@@ -268,10 +290,14 @@ void loop()
       Serial.println(error_cell);
 
       digitalWrite(STATUS_PIN, HIGH);
+    } else {
+      Serial.println("No error found");
+
+      digitalWrite(STATUS_PIN, LOW);
     }
     Serial.println("$ENDERROR$");
 
-    delay(MEASURE_INTERVAL);
+    //delay(MEASURE_INTERVAL);
   } //end racing function
 }
 
@@ -291,12 +317,15 @@ void run_command(uint32_t cmd)
     case 1: // Write and Read Configuration Register
       wakeup_sleep(TOTAL_IC);
       LTC6811_wrcfg(TOTAL_IC, BMS_IC); // Write into Configuration Register
-
+#if DEBUG_MODE
       print_wrconfig();
+#endif
       wakeup_idle(TOTAL_IC);
       error = LTC6811_rdcfg(TOTAL_IC, BMS_IC); // Read Configuration Register
+#if DEBUG_MODE
       check_error(error);
       print_rxconfig();
+#endif
       break;
 
     case 2: // Read Configuration Register
@@ -311,28 +340,36 @@ void run_command(uint32_t cmd)
       wakeup_sleep(TOTAL_IC);
       LTC6811_adcv(ADC_CONVERSION_MODE, ADC_DCP, CELL_CH_TO_CONVERT);
       conv_time = LTC6811_pollAdc();
+#if DEBUG_MODE
       print_conv_time(conv_time);
+#endif
       break;
 
     case 4: // Read Cell Voltage Registers
       wakeup_sleep(TOTAL_IC);
       error = LTC6811_rdcv(SEL_ALL_REG, TOTAL_IC, BMS_IC); // Set to read back all cell voltage registers
+#if DEBUG_MODE
       check_error(error);
       print_cells(DATALOG_DISABLED);
+#endif
       break;
 
     case 5: // Start GPIO ADC Measurement
       wakeup_sleep(TOTAL_IC);
       LTC6811_adax(ADC_CONVERSION_MODE, AUX_CH_TO_CONVERT);
       conv_time = LTC6811_pollAdc();
+#if DEBUG_MODE
       print_conv_time(conv_time);
+#endif
       break;
 
     case 6: // Read AUX Voltage Registers
       wakeup_sleep(TOTAL_IC);
       error = LTC6811_rdaux(SEL_ALL_REG, TOTAL_IC, BMS_IC); // Set to read back all aux registers
+#if DEBUG_MODE
       check_error(error);
       print_aux(DATALOG_DISABLED);
+#endif
       break;
 
     case 7: // Start Status ADC Measurement
@@ -507,35 +544,10 @@ void run_command(uint32_t cmd)
 
     case 23: // Enable a discharge transistor
       s_pin_read = select_s_pin();
-      //return pin input by user, int8
 
       wakeup_sleep(TOTAL_IC);
-      //call wakeup
-
       LTC6811_set_discharge(s_pin_read, TOTAL_IC, BMS_IC);
-      /*    in "LTC6811.cpp"
-            Helper function to set discharge bit in CFG register
-
-            void LTC6811_set_discharge(int Cell, //The cell to be discharged
-                           uint8_t total_ic, //Number of ICs in the system
-                           cell_asic *ic //A two dimensional array that will store the data
-                           )
-            {
-              for (int i=0; i<total_ic; i++)
-              {
-                if ((Cell<9)&& (Cell!=0) )
-                  ic[i].config.tx_data[4] = ic[i].config.tx_data[4] | (1<<(Cell-1));
-                else if (Cell < 13)
-                  ic[i].config.tx_data[5] = ic[i].config.tx_data[5] | (1<<(Cell-9));
-                }
-                //參考以下
-                //CFGR4 RD/WR DCC8    DCC7    DCC6    DCC5    DCC4  DCC3  DCC2  DCC1
-                //CFGR5 RD/WR DCTO[3] DCTO[2] DCTO[1] DCTO[0] DCC12 DCC11 DCC10 DCC9
-           }
-      */
       LTC6811_wrcfg(TOTAL_IC, BMS_IC);
-      /* Write the LTC681x CFGRA */
-
       print_wrconfig();
       wakeup_idle(TOTAL_IC);
       error = LTC6811_rdcfg(TOTAL_IC, BMS_IC);
@@ -723,7 +735,9 @@ void run_command(uint32_t cmd)
       }
       wakeup_idle(TOTAL_IC);
       LTC6811_wrcfg(TOTAL_IC, BMS_IC);
+#if DEBUG_MODE
       print_wrconfig();
+#endif
       break;
 
     case 'm': //prints menu
@@ -1452,13 +1466,17 @@ void START_I2C_COMM(bool is_L, int s_pin) {
 
   wakeup_sleep(TOTAL_IC);
   LTC6811_wrcomm(TOTAL_IC, BMS_IC); // write to comm register
+#if DEBUG_MODE
   print_wrcomm(); // print transmitted data from the comm register
+#endif
 
   wakeup_idle(TOTAL_IC);
   LTC6811_stcomm(3); // initiates communication between master and the I2C slave
 
   wakeup_idle(TOTAL_IC);
   error = LTC6811_rdcomm(TOTAL_IC, BMS_IC); // read from comm register
+#if DEBUG_MODE
   check_error(error);
   print_rxcomm(); // print received data into the comm register
+#endif
 }
