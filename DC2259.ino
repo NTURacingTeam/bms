@@ -11,23 +11,21 @@
 #include "LTC6811.h"
 
 /************************* Defines *****************************/
-#define DEBUG_MODE 1 //1: debugging, 0: racing                    <-------要改-----------------------------
-const unsigned int ALLOWED_VOLTAGE_ERROR[8]={
+#define DEBUG_MODE 0 //1: debugging, 0: racing                    <-------要改-----------------------------
+const unsigned int ALLOWED_VOLTAGE_ERROR[7]={
   0b000000000000,
   0b000000000000,
   0b000000000000,
-  0b000000000000,
-  0b000000000000,
-  0b000000000000,
-  0b000000000000,
-  0b000000000000
+  0b000000000011,
+  0b000000000011,
+  0b000000000001,
+  0b000000000001
   };
 
- const unsigned int ALLOWED_TEMPERATURE_ERROR[8]={
-  0b000000000000,
-  0b000000000000,
-  0b000000000000,
-  0b000000000000,
+ const unsigned int ALLOWED_TEMPERATURE_ERROR[7]={
+  0b000000000100,
+  0b000000000100,
+  0b100000000000,
   0b000000000000,
   0b000000000000,
   0b000000000000,
@@ -38,9 +36,6 @@ const unsigned int ALLOWED_VOLTAGE_ERROR[8]={
 #define DISABLED 0
 #define DATALOG_ENABLED 1
 #define DATALOG_DISABLED 0
-
-/*static int ADG728_L[6] = {5, 6, 4, 3, 2, 1};
-static int ADG728_R[6] = {10, 9, 8, 7, 11, 12};*/
 
 /**************** Local Function Declaration *******************/
 void measurement_loop(uint8_t datalog_en);
@@ -76,17 +71,21 @@ void START_I2C_COMM(bool is_L, int s_pin);
   Setup Variables
   The following variables can be modified to configure the software.
 ********************************************************************/
-const uint8_t TOTAL_IC = 8;//!< Number of ICs in the daisy chain <----------------------------------------
+const uint8_t TOTAL_IC = 7;//!< Number of ICs in the daisy chain <----------------------------------------
 const uint8_t BEGIN_IC = 1; //Start detect flaw IC. 1 is the first IC
 const uint8_t END_IC = TOTAL_IC; //END detect flaw IC. 8 is last IC
 
-const double OVER_VOLTAGE = 4.2+0.6; //Volt                            <----------------------------------------
-const double UNDER_VOLTAGE = 3.0+0.4;//                                <----------------------------------------
+const double ERROR_COMPENSATION = 0.00;
+const double OVER_VOLTAGE = 4.2+ERROR_COMPENSATION; //Volt                            <----------------------------------------
+const double UNDER_VOLTAGE = 3.0+ERROR_COMPENSATION;//                                <----------------------------------------
 const double OVER_TEMPERATURE = 60.0; //Degree Celcius             <----------------------------------------
-const double UNDER_TEMPERATURE = -274.0;//                          <----------------------------------------
+const double UNDER_TEMPERATURE = 0.0;//                          <----------------------------------------
 
-const int MEASURE_INTERVAL = 10000; //milliseconds                  <----------------------------------------
-const int STATUS_PIN = 9;// Pin 9 is for output stats, HIGH when error <------------------------------------
+const int MEASURE_INTERVAL = 1000; //milliseconds                  <----------------------------------------
+const int OUTPUT_MULTIPLIER = 3;
+int output_counter = 0;
+
+const int STATUS_PIN = 32;// Pin 9 is for output stats, HIGH when error <------------------------------------
 
 //ADC Command Configurations. See LTC681x.h for options.
 const uint8_t ADC_OPT = ADC_OPT_DISABLED; //!< ADC Mode option bit
@@ -297,7 +296,8 @@ void loop()
     }
     Serial.println("$ENDERROR$");
 
-    //delay(MEASURE_INTERVAL);
+    delay(MEASURE_INTERVAL);
+    
   } //end racing function
 }
 
@@ -1433,50 +1433,4 @@ double VOLT_READING_TO_TEMP(double v_read) {
   double b_const = 3380.0; //B-Constant (25/50℃): 3380k
   double t = 1 / (log((r_ntc / r_25 > 0 ? r_ntc / r_25 : 0)) / b_const + 1 / 298.15) - 273.15;
   return t; //return temperature in celcius
-}
-
-void START_I2C_COMM(bool is_L, int s_pin) {
-  uint8_t streg = 0;
-  int8_t error = 0;
-  uint32_t conv_time = 0;
-  int8_t s_pin_read = 0;
-
-  for (uint8_t current_ic = 0; current_ic < TOTAL_IC; current_ic++)
-  {
-    //Communication control bits and communication data bytes. Refer to the data sheet.
-    BMS_IC[current_ic].com.tx_data[0] = 0x69; // Icom Start(6) + I2C_address D0 (98) addr=00
-    if (is_L) { //is the left adg728
-      BMS_IC[current_ic].com.tx_data[1] = 0xE8; // Fcom master NACK(8)
-    } else { //is the right adg728
-      BMS_IC[current_ic].com.tx_data[1] = 0x88; // Fcom master NACK(8)
-    }
-
-
-    if (s_pin < 5) {
-      BMS_IC[current_ic].com.tx_data[2] = 0x00; // Icom Blank (0) + D1 (s8 s7 s6 s5 0000) <- S8~S1
-      BMS_IC[current_ic].com.tx_data[3] = (0x09 | (0x10 << (s_pin - 1))); // Fcom master NACK + Stop(9)
-    } else {
-      BMS_IC[current_ic].com.tx_data[2] = (0x00 | (0x01 << (s_pin - 5))); // Icom Blank (0) + D1 (0000 s4 s3 s2 s1) <- S8~S1
-      BMS_IC[current_ic].com.tx_data[3] = 0x09; // Fcom master NACK + Stop(9)
-    }
-
-    BMS_IC[current_ic].com.tx_data[4] = 0x7F; // Icom No Transmit (7) + data D2 (FF)
-    BMS_IC[current_ic].com.tx_data[5] = 0xF9; // Fcom master NACK + Stop(9)
-  }
-
-  wakeup_sleep(TOTAL_IC);
-  LTC6811_wrcomm(TOTAL_IC, BMS_IC); // write to comm register
-#if DEBUG_MODE
-  print_wrcomm(); // print transmitted data from the comm register
-#endif
-
-  wakeup_idle(TOTAL_IC);
-  LTC6811_stcomm(3); // initiates communication between master and the I2C slave
-
-  wakeup_idle(TOTAL_IC);
-  error = LTC6811_rdcomm(TOTAL_IC, BMS_IC); // read from comm register
-#if DEBUG_MODE
-  check_error(error);
-  print_rxcomm(); // print received data into the comm register
-#endif
 }
