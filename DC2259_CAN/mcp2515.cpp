@@ -41,7 +41,7 @@ void MCP2515::endSPI() {
 MCP2515::ERROR MCP2515::reset(void)
 {
     startSPI();
-    SPIn->transfer(INSTRUCTION_RESET);
+    //SPIn->transfer(INSTRUCTION_RESET);
     endSPI();
 
     delay(10);

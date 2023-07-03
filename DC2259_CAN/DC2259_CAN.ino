@@ -68,6 +68,7 @@ void serial_print_hex(uint8_t data);
 char read_hex(void);
 char get_char(void);
 void START_I2C_COMM(bool is_L, int s_pin);
+double VOLT_READING_TO_TEMP(double v_read, double _r_pull_up = 4700.0);
 void LTC6811_single_cell_discharge(int Cell, uint8_t the_IC, cell_asic *ic, bool discharging); //
 
 /*******************************************************************
@@ -83,7 +84,7 @@ const double UNDER_VOLTAGE = 3.0+ERROR_COMPENSATION;//           <--------------
 const double OVER_TEMPERATURE = 60.0; //Degree Celcius           <----------------------------------------
 const double UNDER_TEMPERATURE = 0.0;//                          <----------------------------------------
 
-const int MEASURE_INTERVAL = 1000; //milliseconds                <----------------------------------------
+const int MEASURE_INTERVAL = 100; //milliseconds                <----------------------------------------
 const int OUTPUT_MULTIPLIER = 3;
 int output_counter = 0;
 
@@ -148,6 +149,11 @@ bool DCTOBITS[4] = {true, false, false, false}; //!< Discharge time value // Dct
 
 /*Ensure that Dcto bits are set according to the required discharge time. Refer to the data sheet */
 
+// MCP2515
+MCP2515 mcp2515(48); // set pin 48 as cs pin for mcp2515
+const int frame_num = 2 * 12 * 7 / 8; // frame: 8 bytes, data_type: uint16_t(2 bytes)
+struct can_frame canVol[frame_num], canTemp[frame_num];
+
 /*!**********************************************************************
   \brief  Initializes hardware and variables
   @return void
@@ -171,9 +177,25 @@ void setup()
   LTC6811_reset_crc_count(TOTAL_IC, BMS_IC);
   LTC6811_init_reg_limits(TOTAL_IC, BMS_IC);
 
-  run_command(1); //write config
+  run_command(1); //write config 
   pinMode(STATUS_PIN, OUTPUT);
   digitalWrite(STATUS_PIN, LOW);
+
+  
+  mcp2515.reset();
+  mcp2515.setBitrate(CAN_1000KBPS, MCP_8MHZ);
+  mcp2515.setNormalMode();
+  //mcp2515.setLoopbackMode();
+
+  uint16_t vol_init_id = 0xB00;
+  uint16_t temp_init_id = 0xB2A;
+  for (int i = 0; i < frame_num; i++) {
+    canVol[i].can_id = vol_init_id + i;
+    canVol[i].can_dlc = 8;
+    canTemp[i].can_id = temp_init_id + i;
+    canTemp[i].can_dlc = 8;
+  }
+  
 
 #if DEBUG_MODE
   print_menu();
@@ -204,6 +226,8 @@ void loop()
     for (int current_ic = 0 ; current_ic < TOTAL_IC; current_ic++) {
       for (int i = 0; i < BMS_IC[0].ic_reg.cell_channels; i++) {
         BMS_DATA[current_ic].cell_voltage[i] = (BMS_IC[current_ic].cells.c_codes[i] * 0.0001); //get all voltage
+        canVol[current_ic * 3 + i / 4].data[(i % 4) * 2] = BMS_IC[current_ic].cells.c_codes[i] >> 8;
+        canVol[current_ic * 3 + i / 4].data[(i % 4) * 2 + 1] = BMS_IC[current_ic].cells.c_codes[i] & 0xff;
       }
     }
     for(int i=0; i<6; i++){
@@ -215,8 +239,19 @@ void loop()
       run_command(5); //start aux measuing
       run_command(6); //read back aux measuing
       for (int current_ic = 0 ; current_ic < TOTAL_IC; current_ic++){
-        BMS_DATA[current_ic].temperature[i] = VOLT_READING_TO_TEMP(BMS_IC[current_ic].aux.a_codes[0] * 0.0001); //GPIO 1 Left
-        BMS_DATA[current_ic].temperature[i+6] = VOLT_READING_TO_TEMP(BMS_IC[current_ic].aux.a_codes[1] * 0.0001); //GPIO 2 Right    
+        if (current_ic == 0 || current_ic == 5) {
+          BMS_DATA[current_ic].temperature[i] = VOLT_READING_TO_TEMP(BMS_IC[current_ic].aux.a_codes[0] * 0.0001, 10000); //GPIO 1 Left
+          BMS_DATA[current_ic].temperature[i+6] = VOLT_READING_TO_TEMP(BMS_IC[current_ic].aux.a_codes[1] * 0.0001, 10000); //GPIO 2 Right
+        } else {
+          BMS_DATA[current_ic].temperature[i] = VOLT_READING_TO_TEMP(BMS_IC[current_ic].aux.a_codes[0] * 0.0001); //GPIO 1 Left
+          BMS_DATA[current_ic].temperature[i+6] = VOLT_READING_TO_TEMP(BMS_IC[current_ic].aux.a_codes[1] * 0.0001); //GPIO 2 Right
+        }
+        uint16_t tmp = (uint16_t)(BMS_DATA[current_ic].temperature[i] * 100);
+        canVol[current_ic * 3 + i / 4].data[(i % 4) * 2] = tmp >> 8;
+        canVol[current_ic * 3 + i / 4].data[(i % 4) * 2 + 1] = tmp & 0xff;
+        tmp = (uint16_t)(BMS_DATA[current_ic].temperature[i + 6] * 100);
+        canVol[current_ic * 3 + (i + 6) / 4].data[((i + 6) % 4) * 2] = tmp >> 8;
+        canVol[current_ic * 3 + (i + 6) / 4].data[((i + 6) % 4) * 2 + 1] = tmp & 0xff;
       }
     }
 
@@ -301,6 +336,41 @@ void loop()
     }
     Serial.println("$ENDERROR$");
 
+    /*
+    canVol.data[0] = (uint8_t)BMS_DATA[0].temperature[0];
+    canVol.data[1] = (uint8_t)BMS_DATA[0].temperature[6];
+    canVol.data[2] = 0xFF;
+    canVol.data[3] = 0xFF;
+    digitalWrite(53, HIGH);
+    digitalWrite(48, LOW);
+    mcp2515.sendMessage(&canVol);
+    
+    canTemp.data[0] = 0xFF;
+    canTemp.data[1] = 0xFF;
+    canTemp.data[2] = 0xFF;
+    canTemp.data[3] = 0xFF;
+    mcp2515.sendMessage(&canTemp);
+    */
+
+    mcp2515.reset();
+    mcp2515.setBitrate(CAN_1000KBPS, MCP_8MHZ);
+    mcp2515.setNormalMode();
+    digitalWrite(53, HIGH);
+    digitalWrite(48, LOW);
+
+    for (int i = 0; i < 21; i++) {
+      mcp2515.sendMessage(&canVol[i]);
+      mcp2515.sendMessage(&canTemp[i]);
+    }
+
+    digitalWrite(48, HIGH);
+    digitalWrite(53, LOW);
+    spi_enable(SPI_CLOCK_DIV16);
+
+
+    
+
+    /*
     if(DISCHARGE_MODE){
       double highest_voltage = 0.0;
       double lowest_voltage = 1000.0;
@@ -330,6 +400,7 @@ void loop()
     }else{
       
     }
+    */
 
     delay(MEASURE_INTERVAL);
     
@@ -1464,9 +1535,9 @@ char get_char(void) {
 }
 
 
-double VOLT_READING_TO_TEMP(double v_read) {
+double VOLT_READING_TO_TEMP(double v_read, double _r_pull_up) {
   double v_ref = 3.0; //Pulled up to 3Volt
-  double r_pull_up = 4700.0; //Pulled up by a 4.7kOhm resistor
+  double r_pull_up = _r_pull_up; //Pulled up by a 4.7kOhm resistor
   double r_ntc = v_read * r_pull_up / (v_ref - v_read);
   double r_25 = 10000.0; //10kOhm at 25 degree Celcius
   double b_const = 3380.0; //B-Constant (25/50℃): 3380k
