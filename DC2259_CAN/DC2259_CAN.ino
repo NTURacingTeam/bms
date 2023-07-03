@@ -154,6 +154,9 @@ MCP2515 mcp2515(48); // set pin 48 as cs pin for mcp2515
 const int frame_num = 2 * 12 * 7 / 8; // frame: 8 bytes, data_type: uint16_t(2 bytes)
 struct can_frame canVol[frame_num], canTemp[frame_num];
 
+// For tuning NTC resistor
+const uint16_t resistor[7] = {10000, 4700, 4700, 4700, 4700, 10000, 4700};
+
 /*!**********************************************************************
   \brief  Initializes hardware and variables
   @return void
@@ -239,13 +242,9 @@ void loop()
       run_command(5); //start aux measuing
       run_command(6); //read back aux measuing
       for (int current_ic = 0 ; current_ic < TOTAL_IC; current_ic++){
-        if (current_ic == 0 || current_ic == 5) {
-          BMS_DATA[current_ic].temperature[i] = VOLT_READING_TO_TEMP(BMS_IC[current_ic].aux.a_codes[0] * 0.0001, 10000); //GPIO 1 Left
-          BMS_DATA[current_ic].temperature[i+6] = VOLT_READING_TO_TEMP(BMS_IC[current_ic].aux.a_codes[1] * 0.0001, 10000); //GPIO 2 Right
-        } else {
-          BMS_DATA[current_ic].temperature[i] = VOLT_READING_TO_TEMP(BMS_IC[current_ic].aux.a_codes[0] * 0.0001); //GPIO 1 Left
-          BMS_DATA[current_ic].temperature[i+6] = VOLT_READING_TO_TEMP(BMS_IC[current_ic].aux.a_codes[1] * 0.0001); //GPIO 2 Right
-        }
+        BMS_DATA[current_ic].temperature[i] = VOLT_READING_TO_TEMP(BMS_IC[current_ic].aux.a_codes[0] * 0.0001, resistor[current_ic]); //GPIO 1 Left
+        BMS_DATA[current_ic].temperature[i+6] = VOLT_READING_TO_TEMP(BMS_IC[current_ic].aux.a_codes[1] * 0.0001, resistor[current_ic]); //GPIO 2 Right
+
         uint16_t tmp = (uint16_t)(BMS_DATA[current_ic].temperature[i] * 100);
         canVol[current_ic * 3 + i / 4].data[(i % 4) * 2] = tmp >> 8;
         canVol[current_ic * 3 + i / 4].data[(i % 4) * 2 + 1] = tmp & 0xff;
