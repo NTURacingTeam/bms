@@ -187,8 +187,8 @@ void setup()
   mcp2515.setNormalMode();
   //mcp2515.setLoopbackMode();
 
-  uint16_t vol_init_id = 0xB00;
-  uint16_t temp_init_id = 0xB2A;
+  uint16_t vol_init_id = 0xB00;  // 0xB00 ~ 0xB14
+  uint16_t temp_init_id = 0xB15; // 0xB15 ~ 0xB29
   for (int i = 0; i < frame_num; i++) {
     canVol[i].can_id = vol_init_id + i;
     canVol[i].can_dlc = 8;
