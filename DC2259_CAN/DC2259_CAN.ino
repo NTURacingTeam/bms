@@ -233,6 +233,7 @@ void loop()
         canVol[current_ic * 3 + i / 4].data[(i % 4) * 2 + 1] = BMS_IC[current_ic].cells.c_codes[i] & 0xff;
       }
     }
+    uint16_t tmp;
     for(int i=0; i<6; i++){
       //GPIOBITS_A = {true, true, ((i&0b001)>>0), ((i&0b010)>>1), ((i&0b100)>>2)}; //set channel of mux
       GPIOBITS_A[2] = (i&0b001)>>0;
@@ -245,14 +246,15 @@ void loop()
         BMS_DATA[current_ic].temperature[i] = VOLT_READING_TO_TEMP(BMS_IC[current_ic].aux.a_codes[0] * 0.0001, resistor[current_ic]); //GPIO 1 Left
         BMS_DATA[current_ic].temperature[i+6] = VOLT_READING_TO_TEMP(BMS_IC[current_ic].aux.a_codes[1] * 0.0001, resistor[current_ic]); //GPIO 2 Right
 
-        uint16_t tmp = (uint16_t)(BMS_DATA[current_ic].temperature[i] * 100);
-        canVol[current_ic * 3 + i / 4].data[(i % 4) * 2] = tmp >> 8;
-        canVol[current_ic * 3 + i / 4].data[(i % 4) * 2 + 1] = tmp & 0xff;
+        tmp = (uint16_t)(BMS_DATA[current_ic].temperature[i] * 100);
+        canTemp[current_ic * 3 + i / 4].data[(i % 4) * 2] = tmp >> 8;
+        canTemp[current_ic * 3 + i / 4].data[(i % 4) * 2 + 1] = tmp & 0xff;
         tmp = (uint16_t)(BMS_DATA[current_ic].temperature[i + 6] * 100);
-        canVol[current_ic * 3 + (i + 6) / 4].data[((i + 6) % 4) * 2] = tmp >> 8;
-        canVol[current_ic * 3 + (i + 6) / 4].data[((i + 6) % 4) * 2 + 1] = tmp & 0xff;
+        canTemp[current_ic * 3 + (i + 6) / 4].data[((i + 6) % 4) * 2] = tmp >> 8;
+        canTemp[current_ic * 3 + (i + 6) / 4].data[((i + 6) % 4) * 2 + 1] = tmp & 0xff;
       }
     }
+    free(tmp);
 
     //temperature and voltage measured and saved, now print results
     Serial.println("$STAT$");
@@ -334,22 +336,6 @@ void loop()
       digitalWrite(STATUS_PIN, LOW);
     }
     Serial.println("$ENDERROR$");
-
-    /*
-    canVol.data[0] = (uint8_t)BMS_DATA[0].temperature[0];
-    canVol.data[1] = (uint8_t)BMS_DATA[0].temperature[6];
-    canVol.data[2] = 0xFF;
-    canVol.data[3] = 0xFF;
-    digitalWrite(53, HIGH);
-    digitalWrite(48, LOW);
-    mcp2515.sendMessage(&canVol);
-    
-    canTemp.data[0] = 0xFF;
-    canTemp.data[1] = 0xFF;
-    canTemp.data[2] = 0xFF;
-    canTemp.data[3] = 0xFF;
-    mcp2515.sendMessage(&canTemp);
-    */
 
     mcp2515.reset();
     mcp2515.setBitrate(CAN_1000KBPS, MCP_8MHZ);
