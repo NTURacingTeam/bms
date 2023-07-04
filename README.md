@@ -11,8 +11,9 @@ Default board is Arduino Uno. Need to change the code in **LTC681x.h** (114) for
 ## CAN development
 Using [mcp2515 library](https://github.com/autowp/arduino-mcp2515).
 
-1. They used the same variable name \(**STAT**\) in **mcp2515.h** (311) and **LTC681x.h** (111).;NBSP
-Change the variable name in mcp2515.h.
+1. They used the same variable name \(**STAT**\) in **mcp2515.h** (311) and **LTC681x.h** (111).
+
+    Change the variable name in mcp2515.h.
 ```C++
     enum /*class*/ STATE : uint8_t {
         STATE_RX0IF = (1<<0),
