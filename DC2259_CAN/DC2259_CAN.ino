@@ -25,13 +25,13 @@ const unsigned int ALLOWED_VOLTAGE_ERROR[7]={
   };
 
  const unsigned int ALLOWED_TEMPERATURE_ERROR[7]={
-  0b000000000100,
+  0b000000001100,
   0b000000000100,
   0b100000000000,
+  0b000000010000,
   0b000000000000,
-  0b000000000000,
-  0b000000000000,
-  0b000000000000
+  0b101000000100,
+  0b000000000001
   };
 
 #define ENABLED 1
@@ -75,7 +75,7 @@ void LTC6811_single_cell_discharge(int Cell, uint8_t the_IC, cell_asic *ic, bool
   Setup Variables
   The following variables can be modified to configure the software.
 ********************************************************************/
-const uint8_t TOTAL_IC = 6;//!< Number of ICs in the daisy chain <----------------------------------------
+const uint8_t TOTAL_IC = 7;//!< Number of ICs in the daisy chain <----------------------------------------
 const uint8_t BEGIN_IC = 1; //Start detect flaw IC. 1 is the first IC
 const uint8_t END_IC = TOTAL_IC; //END detect flaw IC. 8 is last IC
 const double ERROR_COMPENSATION = 0.00;
@@ -155,6 +155,7 @@ MCP2515 mcp2515(48); // set pin 48 as cs pin for mcp2515
 //const int frame_num = 28;
 //struct can_frame can_data[frame_num];
 struct can_frame can_data;
+struct can_frame error_status;
 // For tuning NTC resistor
 const uint16_t resistor[7] = {10000, 4700, 4700, 4700, 4700, 10000, 10000};
 long int t1, last = 0;
@@ -208,6 +209,9 @@ void setup()
   can_data.can_id = 0x600;
   can_data.can_dlc = 8;
 
+  error_status.can_id = 0x601;
+  error_status.can_dlc = 1;
+
   /*
   for (uint16_t i = 0; i < frame_num; i++) {
     can_data[i].can_id = can_init_id + i;
@@ -226,7 +230,8 @@ void setup()
               soc[i] = 0.0;
           }
       } else if ((value > 3.3) && (value <= 3.4)) { // 5100 ~ 5400
-          soc[i] = 1 - level[3] - level[2] - level[1] - (3.4 - value) / 0.1 * 300 / 5650;
+          soc[i] = 1 - level[3] 
+          - level[2] - level[1] - (3.4 - value) / 0.1 * 300 / 5650;
       } else if ((value > 3.4) && (value <= 3.65)) { // 2700 ~ 5100
           soc[i] = 1 - level[3] - level[2] - (3.65 - value) / 0.25 * 2400 / 5650;
       } else if ((value > 3.65) && (value <= 4.1)) { // 100 ~ 2700
@@ -315,30 +320,36 @@ void loop()
 
     //error detection
     bool error_flag = false;
-    bool error_type; //false for voltage, true for temperature
-    bool error_bound; //false for under, true for over
-    uint8_t error_ic; //starts with 1
-    uint8_t error_cell; //starts with 1
+    bool error_vol_h; //false for voltage, true for temperature
+    bool error_vol_l; //false for under, true for over
+    bool error_temp_h;
+    bool error_temp_l;
+    //uint8_t error_ic; //starts with 1
+    //uint8_t error_cell; //starts with 1
     for (int current_ic = (BEGIN_IC - 1) ; current_ic < END_IC; current_ic++) {
       for (int i = 0; i < 12; i++) {
         if ((UNDER_VOLTAGE > BMS_DATA[current_ic].cell_voltage[i])&& !((ALLOWED_VOLTAGE_ERROR[current_ic]>>(11-i))&0b1)) {
           error_flag = true;
           error_code[current_ic * 7 + i] += 1;
           error_vol_state[current_ic * 7 + i] = -1;
+          error_vol_l = true;
         } else if ((BMS_DATA[current_ic].cell_voltage[i] > OVER_VOLTAGE)&& !((ALLOWED_VOLTAGE_ERROR[current_ic]>>(11-i))&0b1)) {
           error_flag = true;
           error_code[current_ic * 7 + i] += 1;
           error_vol_state[current_ic * 7 + i] = 1;
+          error_vol_h = true;
         }
 
         if ((UNDER_TEMPERATURE > BMS_DATA[current_ic].temperature[i]) && !((ALLOWED_TEMPERATURE_ERROR[current_ic]>>(11-i))&0b1) && (BMS_DATA[current_ic].temperature[i] > 0)) {
           error_flag = true;
           error_code[current_ic * 7 + i] += 2;
           error_temp_state[current_ic * 7 + i] = -1;
+          error_temp_h = true;
         } else if ((BMS_DATA[current_ic].temperature[i] > OVER_TEMPERATURE)&& !((ALLOWED_TEMPERATURE_ERROR[current_ic]>>(11-i))&0b1)) {
           error_flag = true;
           error_code[current_ic * 7 + i] += 2;
           error_temp_state[current_ic * 7 + i] = 1;
+          error_temp_l = true;
         }
       }
     }
@@ -391,7 +402,7 @@ void loop()
             Serial.print(current_ic + 1);
             Serial.print(" Cell ");
             Serial.println(i + 1);
-            Serial.print("Type: ")
+            Serial.print("Type: ");
             if (error_vol_state[current_ic * 7 + i] < 0) {
               Serial.print("Under");
             } else {
@@ -404,7 +415,7 @@ void loop()
             Serial.print(current_ic + 1);
             Serial.print(" Cell ");
             Serial.println(i + 1);
-            Serial.print("Type: ")
+            Serial.print("Type: ");
             if (error_temp_state[current_ic * 7 + i] < 0) {
               Serial.print("Under");
             } else {
@@ -428,10 +439,10 @@ void loop()
       Serial.print(" Cell ");
       Serial.println(error_cell);
       */
-      digitalWrite(STATUS_PIN, HIGH);
+      digitalWrite(STATUS_PIN, LOW);
     } else {
       Serial.println("No error found");
-      digitalWrite(STATUS_PIN, LOW);
+      digitalWrite(STATUS_PIN, HIGH);
     }
     Serial.println("$ENDERROR$");
 
@@ -457,7 +468,11 @@ void loop()
         tmp = (BMS_DATA[current_ic].cell_voltage[i] - 2) / 0.01;
         can_data.data[(i % 3) * 2 + 1] = (uint8_t)tmp; // 2 ~ 4.55, 0.01/tick
 
-        tmp = ((BMS_DATA[current_ic].temperature[i] + 20) / 0.3125);
+        if (BMS_DATA[current_ic].temperature[i] < -20) {
+          tmp = 0;
+        } else {
+          tmp = ((BMS_DATA[current_ic].temperature[i] + 20) / 0.3125);
+        }
         can_data.data[((i % 3) + 1) * 2] = (uint8_t)tmp;
 
         if (i % 3 == 2) {
@@ -472,6 +487,19 @@ void loop()
       }
     }
 
+    if (error_vol_h) {
+      error_status.data[0] = 1 << 0;
+    }
+    if (error_vol_l) {
+      error_status.data[0] = 1 << 1;
+    }
+    if (error_temp_h) {
+      error_status.data[0] = 1 << 2;
+    }
+    if (error_temp_l) {
+      error_status.data[0] = 1 << 3;
+    }
+    mcp2515.sendMessage(&error_status);
     /*
     for (int i = 0; i < frame_num; i++) {
       mcp2515.sendMessage(&can_data[i]);
@@ -1686,9 +1714,6 @@ double VOLT_READING_TO_TEMP(double v_read, double _r_pull_up) {
   double r_25 = 10000.0; //10kOhm at 25 degree Celcius
   double b_const = 3380.0; //B-Constant (25/50℃): 3380k
   double t = 1 / (log((r_ntc / r_25 > 0 ? r_ntc / r_25 : 0)) / b_const + 1 / 298.15) - 273.15;
-  if (t < -20) {
-    return (-20);
-  }
 
   return t; //return temperature in celcius
 }
