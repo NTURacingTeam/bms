@@ -75,7 +75,7 @@ void LTC6811_single_cell_discharge(int Cell, uint8_t the_IC, cell_asic *ic, bool
   Setup Variables
   The following variables can be modified to configure the software.
 ********************************************************************/
-const uint8_t TOTAL_IC = 7;//!< Number of ICs in the daisy chain <----------------------------------------
+const uint8_t TOTAL_IC = 6;//!< Number of ICs in the daisy chain <----------------------------------------
 const uint8_t BEGIN_IC = 1; //Start detect flaw IC. 1 is the first IC
 const uint8_t END_IC = TOTAL_IC; //END detect flaw IC. 8 is last IC
 const double ERROR_COMPENSATION = 0.00;
@@ -151,11 +151,24 @@ bool DCTOBITS[4] = {true, false, false, false}; //!< Discharge time value // Dct
 
 // MCP2515
 MCP2515 mcp2515(48); // set pin 48 as cs pin for mcp2515
-const int frame_num = 2 * 12 * 7 / 8; // frame: 8 bytes, data_type: uint16_t(2 bytes)
-struct can_frame canVol[frame_num], canTemp[frame_num];
-
+//const int frame_num = 2 * 12 * 7 / 8; // frame: 8 bytes, data_type: uint16_t(2 bytes)
+//const int frame_num = 28;
+//struct can_frame can_data[frame_num];
+struct can_frame can_data;
 // For tuning NTC resistor
-const uint16_t resistor[7] = {10000, 4700, 4700, 4700, 4700, 10000, 4700};
+const uint16_t resistor[7] = {10000, 4700, 4700, 4700, 4700, 10000, 10000};
+long int t1, last = 0;
+
+uint8_t error_code[12 * 7] = {0};
+int8_t error_vol_state[12 * 7] = {0};
+int8_t error_temp_state[12 * 7] = {0};
+
+bool discharge[12 * 7] = {false};
+double discharge_vol[12 * 7] = {0};
+long int t2, discharge_last = 0;
+
+// SOC
+double soc[141] = {0.0};
 
 /*!**********************************************************************
   \brief  Initializes hardware and variables
@@ -184,21 +197,44 @@ void setup()
   pinMode(STATUS_PIN, OUTPUT);
   digitalWrite(STATUS_PIN, LOW);
 
-  
+  //mcp2515 setup
   mcp2515.reset();
-  mcp2515.setBitrate(CAN_1000KBPS, MCP_8MHZ);
+  mcp2515.setBitrate(CAN_250KBPS, MCP_8MHZ);
   mcp2515.setNormalMode();
   //mcp2515.setLoopbackMode();
 
-  uint16_t vol_init_id = 0xB00;  // 0xB00 ~ 0xB14
-  uint16_t temp_init_id = 0xB15; // 0xB15 ~ 0xB29
-  for (int i = 0; i < frame_num; i++) {
-    canVol[i].can_id = vol_init_id + i;
-    canVol[i].can_dlc = 8;
-    canTemp[i].can_id = temp_init_id + i;
-    canTemp[i].can_dlc = 8;
+  uint16_t can_init_id = 0x600;  // 0xB00 ~ 0xB14
+  //uint16_t temp_init_id = 0x615; // 0xB15 ~ 0xB29
+  can_data.can_id = 0x600;
+  can_data.can_dlc = 8;
+
+  /*
+  for (uint16_t i = 0; i < frame_num; i++) {
+    can_data[i].can_id = can_init_id + i;
+    can_data[i].can_dlc = 8;
+    can_data[i].data[0] = (i / 4) + ((i % 4) << 4);
+  }*/
+
+  // SOC Total 5650
+  double level[4] = {300.0 / 5650.0, 2400.0 / 5650.0, 2600.0 / 5650.0, 100.0 / 5650.0};
+  double value;
+  for (int i = 0; i < 141; i++) {
+      value = (double)i / 100 + 2.8;
+      if (value <= 3.3) { // 5400 ~ 5650
+          soc[i] = 1 - level[3] - level[2] - level[1] - level[0] - (3.3 - value) / 0.5 * 250 / 5650;
+          if (soc[i] < 0) {
+              soc[i] = 0.0;
+          }
+      } else if ((value > 3.3) && (value <= 3.4)) { // 5100 ~ 5400
+          soc[i] = 1 - level[3] - level[2] - level[1] - (3.4 - value) / 0.1 * 300 / 5650;
+      } else if ((value > 3.4) && (value <= 3.65)) { // 2700 ~ 5100
+          soc[i] = 1 - level[3] - level[2] - (3.65 - value) / 0.25 * 2400 / 5650;
+      } else if ((value > 3.65) && (value <= 4.1)) { // 100 ~ 2700
+          soc[i] = 1 - level[3] - (4.1 - value) / 0.45 * 2600 / 5650;
+      } else { // 100
+          soc[i] =  1 - (4.2 - value) / 0.1 * 100 / 5650;
+      }
   }
-  
 
 #if DEBUG_MODE
   print_menu();
@@ -226,14 +262,14 @@ void loop()
   } else { //racing function
     run_command(3); //LTC6811 measure cell volt
     run_command(4); //read cell volt from LTC6811
-    for (int current_ic = 0 ; current_ic < TOTAL_IC; current_ic++) {
+    
+    for (int current_ic = 0 ; current_ic < TOTAL_IC; current_ic++) {  //loop in segments
       for (int i = 0; i < BMS_IC[0].ic_reg.cell_channels; i++) {
         BMS_DATA[current_ic].cell_voltage[i] = (BMS_IC[current_ic].cells.c_codes[i] * 0.0001); //get all voltage
-        canVol[current_ic * 3 + i / 4].data[(i % 4) * 2] = BMS_IC[current_ic].cells.c_codes[i] >> 8;
-        canVol[current_ic * 3 + i / 4].data[(i % 4) * 2 + 1] = BMS_IC[current_ic].cells.c_codes[i] & 0xff;
+        //can_data[current_ic * 4 + i / 3].data[(i % 3) * 2 + 1] = (uint8_t)((BMS_DATA[current_ic].cell_voltage[i] - 2) / 0.01); // 2 ~ 4.55, 0.01/tick
+        //canVol[(current_ic * TOTAL_IC + i) / 8].data[(current_ic * TOTAL_IC + i) % 8] = (uint8_t)((BMS_DATA[current_ic].cell_voltage[i] - 1.56) / 0.01) // 1.56 ~ 4.2, 0.01/tick
       }
     }
-    uint16_t tmp;
     for(int i=0; i<6; i++){
       //GPIOBITS_A = {true, true, ((i&0b001)>>0), ((i&0b010)>>1), ((i&0b100)>>2)}; //set channel of mux
       GPIOBITS_A[2] = (i&0b001)>>0;
@@ -246,31 +282,36 @@ void loop()
         BMS_DATA[current_ic].temperature[i] = VOLT_READING_TO_TEMP(BMS_IC[current_ic].aux.a_codes[0] * 0.0001, resistor[current_ic]); //GPIO 1 Left
         BMS_DATA[current_ic].temperature[i+6] = VOLT_READING_TO_TEMP(BMS_IC[current_ic].aux.a_codes[1] * 0.0001, resistor[current_ic]); //GPIO 2 Right
 
-        tmp = (uint16_t)(BMS_DATA[current_ic].temperature[i] * 100);
-        canTemp[current_ic * 3 + i / 4].data[(i % 4) * 2] = tmp >> 8;
-        canTemp[current_ic * 3 + i / 4].data[(i % 4) * 2 + 1] = tmp & 0xff;
-        tmp = (uint16_t)(BMS_DATA[current_ic].temperature[i + 6] * 100);
-        canTemp[current_ic * 3 + (i + 6) / 4].data[((i + 6) % 4) * 2] = tmp >> 8;
-        canTemp[current_ic * 3 + (i + 6) / 4].data[((i + 6) % 4) * 2 + 1] = tmp & 0xff;
+        //can_data[current_ic * 4 + i / 3].data[((i % 3) + 1) * 2] = (uint8_t)((BMS_DATA[current_ic].temperature[i] + 20) / 0.3125);
+        //can_data[current_ic * 4 + (i + 6) / 3].data[(((i + 6) % 3) + 1) * 2] = (uint8_t)((BMS_DATA[current_ic].temperature[i + 6] + 20) / 0.3125); //-20 ~ 60, 0.3125/tick
+        //canTemp[(current_ic * TOTAL_IC + i) / 8].data[(current_ic * TOTAL_IC + i) % 8] = (uint8_t)((BMS_DATA[current_ic].temperature[i] + 20) / 0.3125); //-20 ~ 60, 0.3125/tick
+        //canTemp[(current_ic * TOTAL_IC + i + 6) / 8].data[(current_ic * TOTAL_IC + i + 6) % 8] = (uint8_t)((BMS_DATA[current_ic].temperature[i + 6] + 20) / 0.3125); //-20 ~ 60, 0.3125/tick
       }
     }
-    free(tmp);
 
     //temperature and voltage measured and saved, now print results
     Serial.println("$STAT$");
-    for (int current_ic = 0 ; current_ic < TOTAL_IC; current_ic++) {
-      Serial.print(current_ic + 1);
-      for (int i = 0; i < 12; i++) {
-        Serial.print("$");
-        Serial.print(BMS_DATA[current_ic].cell_voltage[i]);
+    t1 = millis();
+    if (t1 - last > 500) {
+      for (int current_ic = 0 ; current_ic < TOTAL_IC; current_ic++) {
+        Serial.print(current_ic + 1);
+        for (int i = 0; i < 12; i++) {
+          Serial.print("$");
+          if (discharge[current_ic * 12 + i] == 0) {
+            Serial.print(BMS_DATA[current_ic].cell_voltage[i]);
+          } else {
+            Serial.print(discharge_vol[current_ic * 12 + i]);
+          }
+        } 
+        for (int i = 0; i < 12; i++) {
+          Serial.print("$");
+          Serial.print(BMS_DATA[current_ic].temperature[i]);
+        }
+        Serial.println("");
       }
-      for (int i = 0; i < 12; i++) {
-        Serial.print("$");
-        Serial.print(BMS_DATA[current_ic].temperature[i]);
-      }
-      Serial.println("");
+      Serial.println("$ENDSTAT$");
+      last = t1;
     }
-    Serial.println("$ENDSTAT$");
 
     //error detection
     bool error_flag = false;
@@ -278,6 +319,30 @@ void loop()
     bool error_bound; //false for under, true for over
     uint8_t error_ic; //starts with 1
     uint8_t error_cell; //starts with 1
+    for (int current_ic = (BEGIN_IC - 1) ; current_ic < END_IC; current_ic++) {
+      for (int i = 0; i < 12; i++) {
+        if ((UNDER_VOLTAGE > BMS_DATA[current_ic].cell_voltage[i])&& !((ALLOWED_VOLTAGE_ERROR[current_ic]>>(11-i))&0b1)) {
+          error_flag = true;
+          error_code[current_ic * 7 + i] += 1;
+          error_vol_state[current_ic * 7 + i] = -1;
+        } else if ((BMS_DATA[current_ic].cell_voltage[i] > OVER_VOLTAGE)&& !((ALLOWED_VOLTAGE_ERROR[current_ic]>>(11-i))&0b1)) {
+          error_flag = true;
+          error_code[current_ic * 7 + i] += 1;
+          error_vol_state[current_ic * 7 + i] = 1;
+        }
+
+        if ((UNDER_TEMPERATURE > BMS_DATA[current_ic].temperature[i]) && !((ALLOWED_TEMPERATURE_ERROR[current_ic]>>(11-i))&0b1) && (BMS_DATA[current_ic].temperature[i] > 0)) {
+          error_flag = true;
+          error_code[current_ic * 7 + i] += 2;
+          error_temp_state[current_ic * 7 + i] = -1;
+        } else if ((BMS_DATA[current_ic].temperature[i] > OVER_TEMPERATURE)&& !((ALLOWED_TEMPERATURE_ERROR[current_ic]>>(11-i))&0b1)) {
+          error_flag = true;
+          error_code[current_ic * 7 + i] += 2;
+          error_temp_state[current_ic * 7 + i] = 1;
+        }
+      }
+    }
+    /*
     for (int current_ic = (BEGIN_IC - 1) ; current_ic < END_IC; current_ic++) {
       for (int i = 0; i < 12; i++) {
         if (error_flag) {
@@ -299,7 +364,7 @@ void loop()
       for (int i = 0; i < 12; i++) {
         if (error_flag) {
           break;
-        } else if ((UNDER_TEMPERATURE > BMS_DATA[current_ic].temperature[i])&& !((ALLOWED_TEMPERATURE_ERROR[current_ic]>>(11-i))&0b1)) {
+        } else if ((UNDER_TEMPERATURE > BMS_DATA[current_ic].temperature[i]) && !((ALLOWED_TEMPERATURE_ERROR[current_ic]>>(11-i))&0b1) && (BMS_DATA[current_ic].temperature[i] > 0)) {
           error_flag = true; //has error
           error_type = true; //temperature error
           error_bound = false; //under
@@ -314,9 +379,41 @@ void loop()
         }
       }
     }
+    */
 
     Serial.println("$ERROR$");
     if (error_flag) {
+      Serial.println("Error found");
+      for (int current_ic = (BEGIN_IC - 1) ; current_ic < END_IC; current_ic++) {
+        for (int i = 0; i < 12; i++) {
+          if (error_vol_state[current_ic * 7 + i] != 0) {
+            Serial.print("Voltage error at Seg");
+            Serial.print(current_ic + 1);
+            Serial.print(" Cell ");
+            Serial.println(i + 1);
+            Serial.print("Type: ")
+            if (error_vol_state[current_ic * 7 + i] < 0) {
+              Serial.print("Under");
+            } else {
+              Serial.print("Over");
+            }
+          }
+
+          if (error_temp_state[current_ic * 7 + i] != 0) {
+            Serial.print("Temperature error at Seg");
+            Serial.print(current_ic + 1);
+            Serial.print(" Cell ");
+            Serial.println(i + 1);
+            Serial.print("Type: ")
+            if (error_temp_state[current_ic * 7 + i] < 0) {
+              Serial.print("Under");
+            } else {
+              Serial.print("Over");
+            }
+          }
+        }
+      }
+      /*
       if (!error_bound) {
         Serial.print("Under"); //false for under
       } else {
@@ -330,6 +427,7 @@ void loop()
       Serial.print(error_ic);
       Serial.print(" Cell ");
       Serial.println(error_cell);
+      */
       digitalWrite(STATUS_PIN, HIGH);
     } else {
       Serial.println("No error found");
@@ -338,58 +436,119 @@ void loop()
     Serial.println("$ENDERROR$");
 
     mcp2515.reset();
-    mcp2515.setBitrate(CAN_1000KBPS, MCP_8MHZ);
+    mcp2515.setBitrate(CAN_250KBPS, MCP_8MHZ);
     mcp2515.setNormalMode();
     digitalWrite(53, HIGH);
     digitalWrite(48, LOW);
 
-    for (int i = 0; i < 21; i++) {
-      mcp2515.sendMessage(&canVol[i]);
-      mcp2515.sendMessage(&canTemp[i]);
+    /*
+    cantmp.data[0] = 0xff;
+    cantmp.data[1] = 0xff;
+    cantmp.data[2] = 0xff;
+    mcp2515.sendMessage(&cantmp);
+    */
+
+    double tmp;
+    for (int current_ic = (BEGIN_IC - 1) ; current_ic < END_IC; current_ic++) {
+      for (int i = 0; i < 12; i++) {
+        //can_data[current_ic * 4 + i / 3].data[(i % 3) * 2 + 1] = (uint8_t)((BMS_DATA[current_ic].cell_voltage[i] - 2) / 0.01); // 2 ~ 4.55, 0.01/tick
+        //can_data[current_ic * 4 + i / 3].data[((i % 3) + 1) * 2] = (uint8_t)((BMS_DATA[current_ic].temperature[i] + 20) / 0.3125)
+
+        tmp = (BMS_DATA[current_ic].cell_voltage[i] - 2) / 0.01;
+        can_data.data[(i % 3) * 2 + 1] = (uint8_t)tmp; // 2 ~ 4.55, 0.01/tick
+
+        tmp = ((BMS_DATA[current_ic].temperature[i] + 20) / 0.3125);
+        can_data.data[((i % 3) + 1) * 2] = (uint8_t)tmp;
+
+        if (i % 3 == 2) {
+          can_data.data[0] = current_ic + ((i / 3) << 4);
+          can_data.data[7] = 0;
+          for (int cell = 0; cell < 3; cell++) {
+            can_data.data[7] = (error_code[current_ic * 7 + i] & 0b11) << cell * 2; 
+          }
+          mcp2515.sendMessage(&can_data);
+          delay(5);
+        }
+      }
     }
+
+    /*
+    for (int i = 0; i < frame_num; i++) {
+      mcp2515.sendMessage(&can_data[i]);
+      delay(1);
+      //mcp2515.sendMessage(&canTemp[i]);
+    }
+    */
+    
 
     digitalWrite(48, HIGH);
     digitalWrite(53, LOW);
     spi_enable(SPI_CLOCK_DIV16);
 
-
-    
-
-    /*
     if(DISCHARGE_MODE){
       double highest_voltage = 0.0;
       double lowest_voltage = 1000.0;
+
+      /* Move to 265*/
       for (int current_ic = (BEGIN_IC - 1) ; current_ic < END_IC; current_ic++) {
         for (int i = 0; i < 12; i++) { //scan every cell
           if(!((ALLOWED_VOLTAGE_ERROR[current_ic]>>(11-i))&0b1)){ //if the correct voltage is needed
-            if(BMS_DATA[current_ic].cell_voltage[i] > highest_voltage){
+            if (BMS_DATA[current_ic].cell_voltage[i] > highest_voltage){
               highest_voltage = BMS_DATA[current_ic].cell_voltage[i];
-            }else if(BMS_DATA[current_ic].cell_voltage[i] < lowest_voltage){
+            } else if(BMS_DATA[current_ic].cell_voltage[i] < lowest_voltage && discharge[current_ic * 12 + i] == 0){
               lowest_voltage = BMS_DATA[current_ic].cell_voltage[i];
             }
           } 
         }
       }
+
+      double diff = 0.0;
       for (int current_ic = (BEGIN_IC - 1) ; current_ic < END_IC; current_ic++) {
         for (int i = 0; i < 12; i++) { //scan every cell
+          diff = BMS_DATA[current_ic].cell_voltage[i] - lowest_voltage;
+          if (diff > 0.03 && BMS_DATA[current_ic].cell_voltage[i] > 4.1 && discharge[current_ic * 12 + i] == 0) {
+            LTC6811_single_cell_discharge(i+1, current_ic, BMS_IC, 1); //discharge it
+            discharge[current_ic * 12 + i] = 1;
+            discharge_vol[current_ic * 12 + i] = BMS_DATA[current_ic].cell_voltage[i];
+          } 
+          /*else {
+            LTC6811_single_cell_discharge(i+1, current_ic, BMS_IC, 0); // stop dischargin it
+          }
+          */
+          /*
           if (BMS_DATA[current_ic].cell_voltage[i] > lowest_voltage){
             LTC6811_single_cell_discharge(i+1, current_ic, BMS_IC, 1); //discharge it
           }else{
             LTC6811_single_cell_discharge(i+1, current_ic, BMS_IC, 0); // stop dischargin it
           }
+          */
         }
       }
+      discharge_last = millis();
       if(highest_voltage == lowest_voltage){
         Serial.println("Discharge Complete");
       }
     }else{
       
     }
-    */
 
-    delay(MEASURE_INTERVAL);
-    
+    t2 = millis();
+    if (t2 - discharge_last > 300) {
+      turn_off_discharge();
+    }
+
+    //delay(MEASURE_INTERVAL);
   } //end racing function
+}
+
+void turn_off_discharge()
+{
+  for (int i = 0; i < 7 * 12; i++) {
+    if (discharge[i] == 1) {
+      discharge[i] = 0;
+      LTC6811_single_cell_discharge((i % 12) + 1, i / 12, BMS_IC, 0);
+    }
+  }
 }
 
 /*!*****************************************
@@ -1527,6 +1686,10 @@ double VOLT_READING_TO_TEMP(double v_read, double _r_pull_up) {
   double r_25 = 10000.0; //10kOhm at 25 degree Celcius
   double b_const = 3380.0; //B-Constant (25/50℃): 3380k
   double t = 1 / (log((r_ntc / r_25 > 0 ? r_ntc / r_25 : 0)) / b_const + 1 / 298.15) - 273.15;
+  if (t < -20) {
+    return (-20);
+  }
+
   return t; //return temperature in celcius
 }
 
