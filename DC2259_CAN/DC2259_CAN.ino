@@ -487,6 +487,7 @@ void loop()
       }
     }
 
+    error_status.data[0] = 0;
     if (error_vol_h) {
       error_status.data[0] = 1 << 0;
     }
