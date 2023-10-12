@@ -13,7 +13,7 @@
 
 /************************* Defines *****************************/
 #define DEBUG_MODE 0 //1: debugging, 0: racing                    <-------要改-----------------------------
-#define DISCHARGE_MODE 1 //1 for allowing discharge
+#define DISCHARGE_MODE 0 //1 for allowing discharge
 const unsigned int ALLOWED_VOLTAGE_ERROR[7]={
   0b000000000000,
   0b000000000000,
@@ -25,7 +25,7 @@ const unsigned int ALLOWED_VOLTAGE_ERROR[7]={
   };
 
  const unsigned int ALLOWED_TEMPERATURE_ERROR[7]={
-  0b000000001100,
+  0b000000001111,
   0b000000000100,
   0b100000000000,
   0b000000010000,
