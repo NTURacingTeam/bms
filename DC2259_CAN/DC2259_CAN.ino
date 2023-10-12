@@ -320,10 +320,10 @@ void loop()
 
     //error detection
     bool error_flag = false;
-    bool error_vol_h; //false for voltage, true for temperature
-    bool error_vol_l; //false for under, true for over
-    bool error_temp_h;
-    bool error_temp_l;
+    bool error_vol_h = false; //false for voltage, true for temperature
+    bool error_vol_l = false; //false for under, true for over
+    bool error_temp_h = false;
+    bool error_temp_l = false;
     //uint8_t error_ic; //starts with 1
     //uint8_t error_cell; //starts with 1
     for (int current_ic = (BEGIN_IC - 1) ; current_ic < END_IC; current_ic++) {
